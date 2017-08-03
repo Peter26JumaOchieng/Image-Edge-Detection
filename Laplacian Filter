@@ -1,0 +1,77 @@
+import utility.HtmlReport;
+import utility.MatriciLaplaciane;
+import ij.*;
+import ij.process.*;
+import ij.gui.*;
+import java.awt.*;
+import ij.plugin.filter.*;
+
+import java.io.File;
+import ij.ImageJ;
+import ij.ImagePlus;
+import ij.io.Opener;
+
+import net.imglib2.img.ImagePlusAdapter;
+import net.imglib2.img.Img;
+import net.imglib2.img.display.imagej.ImageJFunctions;
+import net.imglib2.type.NativeType;
+import net.imglib2.type.numeric.NumericType;
+
+ 
+/**
+ *
+ */
+public class Laplaciano implements PlugInFilter {
+    ImagePlus imp;
+    HtmlReport report;
+    String directory;
+    String nomeImg;
+    
+    public int setup(String arg, ImagePlus imp2) {
+  	    File file = new File("C:\\Users\\user\\Desktop\\ImageJ_Laplacian\\DrosophilaWing.tif");
+  		imp = new Opener().openImage( file.getAbsolutePath());
+        String directory = file.getAbsolutePath();
+        Img image = ImagePlusAdapter.wrap( imp ); 
+        ImageJFunctions.show( image );
+        
+        nomeImg = imp.getTitle();
+        report = new HtmlReport( directory+nomeImg );
+        return DOES_RGB + DOES_8G;
+    }
+
+    public void run(ImageProcessor ip) {
+        // mostra dialog per l'inserimento di parametri
+        GenericDialog window = new GenericDialog("Laplaciano Plugin");
+        String[] items = {"1", "3", "5", "7"};
+        window.addChoice("Apertura", items, null);
+        window.showDialog();
+
+        if (window.wasCanceled()) {
+            return;
+        }
+
+        int apertura = Integer.parseInt(window.getNextChoice());
+        
+        float[] kernel = MatriciLaplaciane.getInstance().getLaplace(apertura);
+        
+        ip.convolve(kernel, apertura, apertura);
+        
+        // aggiorna l'immagine
+        imp.updateAndDraw();
+        
+        // genera report
+        createReport(apertura);
+    }
+    
+    private void createReport(int apertura){
+        report.setOperation("Laplace Plugin");
+        report.setSummary("Estrae i bordi dell'immagine con un filtro Laplaciano."); 
+        report.setDetails("\"Laplace\" calcola il Laplaciano dell'immagine sommando le derivate "
+                + "seconde lungo gli assi x e y, che sono ottenute applicando l'operatore di Sobel: <BR>"
+                + "Output = d2Input/dx2 + d2Input/dy2.");
+        report.addParameter("Apertura", "Dimensione della finestra usata per cacolare il filtro derivativo del second'ordine.", ""+apertura);
+        report.addReference("Anil. K. Jain, Fundamentals of Digital Image Processing, Prentice Hall, pp. 347-357, 1989."); 
+        
+        report.generateReport("Report_Laplace.html");
+    }
+}
