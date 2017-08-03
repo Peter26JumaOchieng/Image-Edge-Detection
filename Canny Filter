@@ -1,0 +1,238 @@
+import utility.HtmlReport;
+import utility.MatriciGaussiane;
+import utility.NucleiSobel;
+import ij.*;
+import ij.process.*;
+import ij.gui.*;
+import java.awt.*;
+import ij.process.ByteProcessor;
+import ij.plugin.filter.*;
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.List;
+
+import java.io.File;
+import ij.ImageJ;
+import ij.ImagePlus;
+import ij.io.Opener;
+
+import net.imglib2.img.ImagePlusAdapter;
+import net.imglib2.img.Img;
+import net.imglib2.img.display.imagej.ImageJFunctions;
+import net.imglib2.type.NativeType;
+import net.imglib2.type.numeric.NumericType;
+
+/**
+ *
+ */
+public class Canny implements PlugInFilter{
+    ImagePlus imp;
+    HtmlReport report;
+    String directory;
+    String nomeImg;
+    private Convolver convolver=new Convolver(); // SERVE A SVOLGERE LE CONVOLUZIONI
+    
+    public int setup(String arg, ImagePlus imp2){
+	    
+	    File file = new File("C:\\Users\\user\\Desktop\\ImageJ_Canny\\DrosophilaWing.tif");
+  		imp = new Opener().openImage( file.getAbsolutePath());
+        String directory = file.getAbsolutePath();
+        Img image = ImagePlusAdapter.wrap( imp ); 
+        ImageJFunctions.show( image );
+        
+        directory = imp.getOriginalFileInfo().directory;
+        nomeImg = imp.getTitle();
+        report = new HtmlReport( directory+nomeImg );
+        return DOES_RGB+DOES_8G;
+    }
+    
+    
+    public void run(ImageProcessor ip){
+        GenericDialog window = new GenericDialog("Canny");  //
+        String[] items = {"3", "5", "7"};                   //
+        window.addChoice("Apertura", items, null);          // CREO LA FINESTRA DI DIALOGO
+        window.addSlider("Soglia 1", 0, 255, 32);           // DA VISUALIZZARE PER I PARAMETRI
+        window.addSlider("Soglia 2", 0, 255, 32);           // DEL FILTRO CANNY
+        window.showDialog();                                //
+        
+        if(window.wasCanceled())
+            return;
+        
+        int apertura = Integer.parseInt(window.getNextChoice());    //
+        int sogliaInf = (int)window.getNextNumber();                // MEMORIZZO TUTTI I PARAMETRI DA USARE
+        int sogliaSup = (int)window.getNextNumber();                //
+        
+        window.dispose();
+        window=new GenericDialog("Attenzione!");                                        //
+        if (sogliaInf>sogliaSup){                                                       // CONTROLLO CHE LA SOGLIA INFERIORE
+            window.addMessage("La soglia inferiore e' maggiore della soglia superiore"); // NON SIA MAGGIORE DELLA SOGLIA
+            window.showDialog();                                                        // SUPERIORE
+            return;                                                                     //
+        }
+        
+        ByteProcessor bp = Canny(ip, apertura, sogliaInf, sogliaSup);
+        ImagePlus outImg = new ImagePlus("Risultato Filtro Canny",bp);
+        outImg.show();
+        
+        createReport(apertura, sogliaInf, sogliaSup);
+    }
+    
+    public ByteProcessor Canny(ImageProcessor image, int apertura, float sogliaInf, float sogliaSup){
+        int width = image.getWidth();       // LARGHEZZA DELL'IMMAGINE
+        int height = image.getHeight();     // ALTEZZA DELL'IMMAGINE
+        
+        /*********************************************************************/
+        /* PRIMO PASSO: APPLICARE MATRICA GAUSSIANA PER SMUSSARE L'IMMAGINE  */
+        /*********************************************************************/
+        
+        ByteProcessor ip = getByteProcessor(image);             // 
+        
+        float[] gaussianKernel = MatriciGaussiane.getInstance().getGaussian(apertura);  // RITORNA IL KERNEL GAUSSIANO
+        ip.convolve(gaussianKernel, apertura, apertura);                                // EFFETTUO CONVOLUZIONE GAUSSIANA PER RIDURRE IL RUMORE
+        
+        
+        /*********************************************************************/
+        /*  SECONDO PASSO: CALCOLO DEL GRADIENTE  E DELLA DIREZIONE          */
+        /*                 ATTRAVERSO GLI OPERATORI SOBEL E OPPORTUNE FORMULE*/
+        /*********************************************************************/
+        
+        ByteProcessor sobelX;
+        ByteProcessor sobelY;
+        sobelX = convolveImage(ip,NucleiSobel.getInstance().getSobel(apertura, "Verticale"));  // RITORNA IL KERNEL DI SOBEL E FA LA CONVOLUZIONE
+        sobelY = convolveImage(ip,NucleiSobel.getInstance().getSobel(apertura, "Orizzontale"));// RITORNA IL KERNEL DI SOBEL E FA LA CONVOLUZIONE
+        
+        double gradiente[][] = new double[width][height];         //CREO MATRICE CHE RAPPRESENTERA' I VALORI DEL GRADIENTE
+        double direzione[][] = new double[width][height];         // CREO MATRICE CHE CONTERRA' LA DIREZIONE PER OGNI PIXEL
+        
+        for (int x=0;x<width;x++){
+            for(int y=0;y<height;y++){
+                gradiente[x][y]=(float)Math.sqrt((sobelX.get(x,y)*sobelX.get(x,y)) +    // APPLICO LA FORMULA PER IL GRADIENTE:
+                                                 (sobelY.get(x,y)*sobelY.get(x,y)));    // G = Math.sqrt( Gx^2 + Gy^2 )
+                direzione[x][y]=(float)Math.atan2(sobelY.get(x,y),sobelX.get(x,y));     // CALCOLO DIREZIONE: arctan( Gy/Gx )
+            }
+        }        
+        
+        /*********************************************************************/
+        /*     TERZO PASSO: CALCOLO BORDO E INDIVIDUAZIONE DI ADGE WEAK      */
+        /*********************************************************************/
+        
+        ByteProcessor out = new ByteProcessor(width,height);
+        List<int[]> edgeWeak = new ArrayList<int[]>();
+        
+        for (int y=1; y<height-1; y++){
+            for (int x=1; x<width-1; x++){
+                
+                if(isMaxLocale(gradiente, x, y, direzione)) continue;
+                double pixel = gradiente[x][y];
+                
+                // SE IL VALORE DEL PIXEL E' INFERIORE ALLA SOGLIA1, NON E' EDGE
+                if(pixel<sogliaInf){
+                    continue;
+                }
+                
+                // SE IL VALORE DEL PIXEL E' SUPERIORE ALLA SOGLIA2, E' UN STRONGEDGE
+                if(pixel>sogliaSup){
+                    out.set(x,y,255);
+                    continue;
+                }
+                
+                // SE IL VALORE DEL PIXEL E' COMPRESO TRA SOGLIA1 E SOGLIA2, E' UN WEAK ADGE
+                edgeWeak.add(new int[]{x,y});
+            }
+        }
+        
+        /*********************************************************************/
+        /*    QUARTO PASSO: CALCOLO BORDO E INDIVIDUAZIONE DI ADGE WEAK      */
+        /*********************************************************************/
+        
+        boolean change=true;
+        while(change){
+            // PER OGNI WEAK EDGE
+            change=false;
+            Iterator<int[]> iter = edgeWeak.iterator();
+            
+            while(iter.hasNext()){
+                int[] pixel = iter.next();
+                int i=pixel[0];
+                int j=pixel[1];
+                // GUARDO I VICINI SE SONO FORTI EDGE
+                if(out.get(i-1,j+1)>0||out.get(i-1,j)>0||out.get(i-1,j-1)>0||
+                        out.get(i,j+1)>0||out.get(i,j-1)>0||out.get(i+1,j+1)>0||
+                        out.get(i+1,j)>0||out.get(i+1,j-1)>0)
+                    out.set(i,j,255);
+                
+                iter.remove();
+                change=true;
+            }
+        }
+        
+        return out;
+    }
+    
+    
+    /*********************************************************************/
+    /*       VERIFICA DEL PIXEL DEL GRADIENTE SE E' MASSIMO LOCALE       */
+    /*********************************************************************/
+    private boolean isMaxLocale(double[][] gradiente, int x, int y, double[][] direzione){
+        double grad = gradiente[x][y];
+        
+        if(grad<1) return false;
+        
+        // DIREZIONE DEL GRADIENTE
+        double gx = Math.cos( direzione[x][y] );
+        double gy = Math.sin( direzione[x][y] );
+        
+        // SCALING
+        double gmax = Math.max( Math.abs(gx), Math.abs(gy) );
+        float scale = (float)(1.0/gmax);
+        
+        // DAL PIXEL ATTUALE CALCOLIAMO LA POSIZIONE DEL PROSSIMO PIXEL DEL GRADIENTE SECONDO LA DIREZIONE
+        int prosX = (int)(x + gx * scale);
+        int prosY = (int)(y + gy * scale);
+        double pixPros = gradiente[prosX][prosY];
+        
+        // DAL PIXEL ATTUALE CALCOLIAMO LA POSIZIONE DEL PRECEDENTE PIXEL DEL GRADIENTE SECONDO LA DIREZIONE
+        int precX = (int) (x - gx * scale);
+        int precY = (int) (y - gy * scale);
+        double pixPrec = gradiente[precX][precY];
+        
+        // IL VALORE CORRENTE DEL GRADIENTE E' MASSIMO LOCALE ?
+        if(grad>pixPros && grad>pixPrec) return false;
+        
+        return true;
+    }
+    
+    private ByteProcessor getByteProcessor(ImageProcessor ip){
+        ByteProcessor bp = new ByteProcessor(ip.getWidth(),ip.getHeight());
+        for (int y = 0; y < ip.getHeight(); y++){
+            for (int x = 0; x < ip.getWidth(); x++){
+                bp.set(x,y,ip.getPixel(x,y));
+            }
+        }
+        return bp;
+    }
+    
+    private ByteProcessor convolveImage(ByteProcessor bp, float kernel[]){
+        convolver.setNormalize(true);
+        ByteProcessor out = getByteProcessor(bp);
+        convolver.convolve(out,kernel,(int)Math.sqrt(kernel.length),(int)Math.sqrt(kernel.length));
+        return out;
+    }
+    
+    private void createReport(int apertura, int soglia1, int soglia2){
+        report.setOperation("Canny Plugin");
+        report.setSummary("Estrae i bordi con il filtro di Canny."); 
+        report.setDetails("\"Canny\"  trova, mediante l'algoritmo di Canny, i bordi "
+                + "dell'immagine e li indica sull'immagine d'uscita. Il valore piu' "
+                + "piccolo tra \"Soglia 1\" e \"Soglia 2\" viene utilizzato per "
+                + "interconnettere i bordi, mentre il valore piu' grande viene usato "
+                + "per trovare i segmenti iniziali dei bordi piu' marcati.");
+        report.addParameter("Apertura", "Dimensione della finestra usata per il filtraggio.", ""+apertura);
+        report.addParameter("Soglia 1", "Primo livello di soglia.", ""+soglia1);
+        report.addParameter("Soglia 2", "Secondo livello di soglia.", ""+soglia2);
+        report.addReference("J. Canny, A Computational Approach to Edge Detection, in IEEE "
+                + "Transactions on Pattern Analysis and Machine Intelligence, vol. 8, no. 6, 1986."); 
+        
+        report.generateReport("Report_Canny.html");
+    }
+}
